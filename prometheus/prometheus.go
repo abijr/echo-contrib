@@ -37,7 +37,6 @@ import (
 )
 
 var defaultMetricPath = "/metrics"
-var defaultSubsystem = "echo"
 
 const (
 	_          = iota // ignore first value by assigning to blank identifier
@@ -144,6 +143,7 @@ type Prometheus struct {
 	MetricsPath string
 	Subsystem   string
 	Skipper     middleware.Skipper
+	Registry    *prometheus.Registry
 
 	RequestCounterURLLabelMappingFunc  RequestCounterLabelMappingFunc
 	RequestCounterHostLabelMappingFunc RequestCounterLabelMappingFunc
@@ -178,13 +178,12 @@ func NewPrometheus(subsystem string, skipper middleware.Skipper, customMetricsLi
 	} else if len(customMetricsList) == 1 {
 		metricsList = customMetricsList[0]
 	}
-
 	metricsList = append(metricsList, standardMetrics...)
 
 	p := &Prometheus{
 		MetricsList: metricsList,
 		MetricsPath: defaultMetricPath,
-		Subsystem:   defaultSubsystem,
+		Subsystem:   subsystem,
 		Skipper:     skipper,
 		RequestCounterURLLabelMappingFunc: func(c echo.Context) string {
 			return c.Path() // i.e. by default do nothing, i.e. return URL as is
@@ -192,9 +191,8 @@ func NewPrometheus(subsystem string, skipper middleware.Skipper, customMetricsLi
 		RequestCounterHostLabelMappingFunc: func(c echo.Context) string {
 			return c.Request().Host
 		},
+		Registry: nil,
 	}
-
-	p.registerMetrics(subsystem)
 
 	return p
 }
@@ -233,10 +231,10 @@ func (p *Prometheus) SetPushGatewayJob(j string) {
 // SetMetricsPath set metrics paths
 func (p *Prometheus) SetMetricsPath(e *echo.Echo) {
 	if p.listenAddress != "" {
-		p.router.GET(p.MetricsPath, prometheusHandler())
+		p.router.GET(p.MetricsPath, p.prometheusHandler())
 		p.runServer()
 	} else {
-		e.GET(p.MetricsPath, prometheusHandler())
+		e.GET(p.MetricsPath, p.prometheusHandler())
 	}
 }
 
@@ -364,10 +362,9 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 }
 
 func (p *Prometheus) registerMetrics(subsystem string) {
-
 	for _, metricDef := range p.MetricsList {
 		metric := NewMetric(metricDef, subsystem)
-		if err := prometheus.Register(metric); err != nil {
+		if err := p.Registry.Register(metric); err != nil {
 			log.Errorf("%s could not be registered in Prometheus: %v", metricDef.Name, err)
 		}
 		switch metricDef {
@@ -386,6 +383,7 @@ func (p *Prometheus) registerMetrics(subsystem string) {
 
 // Use adds the middleware to the Echo engine.
 func (p *Prometheus) Use(e *echo.Echo) {
+	p.registerMetrics(p.Subsystem)
 	e.Use(p.HandlerFunc)
 	p.SetMetricsPath(e)
 }
@@ -439,8 +437,14 @@ func (p *Prometheus) HandlerFunc(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-func prometheusHandler() echo.HandlerFunc {
-	h := promhttp.Handler()
+func (p *Prometheus) prometheusHandler() echo.HandlerFunc {
+	var h http.Handler
+	if p.Registry == nil {
+		h = promhttp.Handler()
+	} else {
+		h = promhttp.HandlerFor(p.Registry, promhttp.HandlerOpts{})
+	}
+
 	return func(c echo.Context) error {
 		h.ServeHTTP(c.Response(), c.Request())
 		return nil
